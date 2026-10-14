@@ -35,7 +35,7 @@
 
 ### 消息可靠性: Store-then-Deliver
 
-每条聊天消息采用 **先落库、再推送** 策略，保证 at-least-once 语义：
+每条聊天消息采用 **先尝试落库、再推送** 策略，客户端 ACK 后删除离线记录；数据库连接或写入失败需要通过运行日志和监控发现：
 
 ```
 Sender 发消息
@@ -59,7 +59,7 @@ Sender 发消息
 
 ## 技术栈
 
-* C++11
+* C++14
 * Muduo Reactor 高并发网络库
 * MySQL 8.0 数据持久化 + 连接池
 * Redis 发布订阅（跨服务器通信）+ Cache-Aside 缓存
@@ -81,7 +81,7 @@ Sender 发消息
 * [x] 跨服务器消息转发（Redis pub/sub）
 * [x] 服务器异常下线自动处理
 * [x] Nginx TCP Stream 四层负载均衡 + 健康检查
-* [x] Store-then-Deliver 消息可靠性（at-least-once）
+* [x] Store-then-Deliver 消息流程（落库、推送、客户端 ACK 删除）
 * [x] 客户端 ACK 确认机制
 
 ## 目录结构
@@ -91,14 +91,12 @@ Sender 发消息
 ├── nginx.conf                 # Nginx TCP Stream 负载均衡配置
 ├── CMakeLists.txt
 ├── autobuild.sh
-├── run_all_tests.sh           # 全维度压测（登录/注册/聊天/浸泡）
-├── soak_test.sh               # 5分钟稳定性浸泡测试
+├── run_all_tests.sh           # Apache JMeter 官方压测入口
+├── soak_test.sh               # Apache JMeter 浸泡入口
 ├── cluster.sh                 # 集群管理（启动/停止/扩缩容）
 ├── bin/                       # 编译产物
 │   ├── ChatClient
 │   ├── ChatServer
-│   ├── ChatBench
-│   └── ConnBench
 ├── include/
 │   ├── public.hpp              # 消息类型枚举 + msg_uuid 生成
 │   ├── protocol.hpp            # 长度前缀帧协议
@@ -137,16 +135,16 @@ Sender 发消息
 │       │   └── offlinemessagemodel.cpp
 │       └── redis/
 │           └── redis.cpp
-├── example/                   # 压测工具
-│   ├── bench_main.cpp
-│   ├── bench_worker.hpp       # 5种压测场景
-│   ├── bench_stats.hpp        # 分位数统计
-│   └── conn_bench.cpp         # TCP连接数压测
+├── example/                   # 服务端/客户端示例入口
 └── thirdparty/
     └── json.hpp               # nlohmann/json (header-only)
 ```
 
+性能数据统一使用 `perf/jmeter/` 的 Apache JMeter 计划，长连接使用 `perf/tsung/` 的 Tsung 脚本。
+
 ## 编译运行
+
+完整优化过程、压测命令和结果见 [docs/optimization-and-benchmark.md](docs/optimization-and-benchmark.md)。
 
 ### 0. 环境准备
 
@@ -231,7 +229,69 @@ chmod +x autobuild.sh
 ./autobuild.sh
 ```
 
-编译产物在 `bin/` 目录下：`ChatServer`/`ChatClient`/`ChatBench`/`ConnBench`。
+编译产物在 `bin/` 目录下：`ChatServer`/`ChatClient`。性能压测使用 `perf/jmeter/chat_login.jmx` 中的 Apache JMeter TCP Sampler。
+
+### 数据库连接配置
+
+服务端不再从源码读取数据库密码。启动前设置已有数据库的连接参数：
+
+```bash
+export CHAT_DB_HOST=127.0.0.1
+export CHAT_DB_PORT=3306
+export CHAT_DB_USER=root
+export CHAT_DB_PASSWORD='你的MySQL密码'
+export CHAT_DB_NAME=chat
+export CHAT_REDIS_HOST=127.0.0.1
+export CHAT_REDIS_PORT=6379
+```
+
+### 业务线程池模式
+
+默认使用有界固定线程池：
+
+```bash
+export CHAT_THREADPOOL_MODE=fixed
+```
+
+也可以在启动时选择从外部 `threadpool` 项目适配的缓存线程池：
+
+```bash
+export CHAT_THREADPOOL_MODE=cached
+./bin/ChatServer 127.0.0.1 6000
+```
+
+缓存线程池会在所有核心线程忙碌且队列有积压时扩容到上限，空闲超时的非核心线程会退出。队列满时会等待空闲位，任务不会回退到 Muduo IO 线程执行。线程池只在进程启动时选择，不能在运行中热切换，否则会破坏登录、退出和聊天消息的顺序；需要切换模式时先停止服务再重新启动。
+
+`cluster.sh` 会复用这些环境变量重置在线状态；未设置 `CHAT_DB_PASSWORD` 时不会执行无密码数据库操作。
+
+### 数据库索引迁移
+
+好友、群成员和离线消息查询依赖以下索引。首次部署或已有数据库升级时执行：
+
+```bash
+mysql -u "$CHAT_DB_USER" -p "$CHAT_DB_NAME" \
+  < sql/002_performance_indexes.sql
+```
+
+迁移脚本会增加 `friend`、`groupuser` 和 `offlinemessage` 的查询索引。重复执行前先检查索引是否已经存在，避免 MySQL 报重复索引错误。
+
+### 连接池告警
+
+当数据库连接池没有空闲连接时，服务端会记录：
+
+```text
+MySQL connection pool exhausted; falling back to a temporary connection
+```
+
+压测时应同时观察该告警。如果频繁出现，说明业务线程数超过数据库连接池承载能力，应调整 `ChatServer` 的数据库连接池大小或降低并发，而不能只看登录接口的平均延迟。
+
+业务线程池队列达到 80% 时也会记录告警：
+
+```text
+business thread pool queue is above 80%
+```
+
+该告警表示请求已经开始排队，后续应同时记录队列长度、数据库连接池可用数和接口 P95/P99。
 
 ### 4. 启动服务端
 
@@ -241,7 +301,7 @@ chmod +x autobuild.sh
 cd bin
 ./ChatServer 127.0.0.1 6000
 
-# 无线程池模式（对比性能用）
+# 无线程池模式（仅用于已有实现对比）
 ./ChatServer 127.0.0.1 6000 --no-pool
 ```
 
@@ -300,14 +360,11 @@ sudo ss -tlnp | grep 8000
 # 先启动服务端
 ./bin/ChatServer 127.0.0.1 6000 &
 
-# 全维度压测（登录梯度/注册/聊天/线程池A/B/浸泡）
-./run_all_tests.sh
-
-# 单独浸泡测试（5分钟，检测内存/句柄泄露）
-./soak_test.sh
-
-# ChatBench 手动调参
-./bin/ChatBench --ip 127.0.0.1 --port 6000 --scenario login --concurrency 100 --total 500
+# 官方压测工具
+./run_all_tests.sh 50 1 6000
+# 浸泡测试
+./soak_test.sh 300 50
+# 详细说明：perf/jmeter/README.md
 ```
 
 ## 核心设计决策
@@ -315,7 +372,7 @@ sudo ss -tlnp | grep 8000
 | 层面 | 决策 | 原因 |
 |------|------|------|
 | 协议 | 长度前缀帧 (4字节大端头+载荷) | O(1) 粘包处理，替代分隔符方案 |
-| 并发 | IO线程 + 业务线程池分离 | dispatch 模式，避免 IO 线程阻塞 |
+| 并发 | IO线程 + 业务线程池分离 | 业务逻辑在线程池执行，队列满时在提交边界背压，避免静默丢任务 |
 | 缓存 | Redis Cache-Aside | user/friends/groups 三类热点数据缓存 |
 | 集群 | Redis pub/sub 对等节点 | 跨服务器消息实时路由 |
 | 可靠性 | Store-then-Deliver | 先落 offlineMsg 再推送，DB 兜底 |

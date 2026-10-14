@@ -5,10 +5,10 @@
 // offlinemessage表: userid(int) message(varchar(2000))
 // Store-then-Deliver: 每条消息携带 msg_uuid，支持精确删除
 
-void OfflineMsgModel::insert(int userid, string msg)
+bool OfflineMsgModel::insert(int userid, const string &msg)
 {
     MySQL mysql;
-    if (!mysql.connect()) return;
+    if (!mysql.connect()) return false;
 
     // 使用 mysql_real_escape_string 做专业 SQL 转义
     // message 字段扩至 2000 字符以适应带 msg_uuid 的 JSON
@@ -16,7 +16,7 @@ void OfflineMsgModel::insert(int userid, string msg)
     sprintf(sql, "insert into offlinemessage(userid, message) values(%d, '%s')",
             userid, mysql.escape(msg).c_str());
 
-    mysql.update(sql);
+    return mysql.update(sql);
 }
 
 void OfflineMsgModel::remove(int userid)

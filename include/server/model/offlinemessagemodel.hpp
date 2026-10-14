@@ -10,7 +10,7 @@ class OfflineMsgModel
 {
 public:
     // 存储用户的离线信息
-    void insert(int userid, string msg);
+    bool insert(int userid, const string &msg);
 
     // 删除用户全部离线消息（登录时批量拉取后调用）
     void remove(int userid);

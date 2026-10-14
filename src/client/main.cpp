@@ -224,7 +224,7 @@ void doRegResponse(json &responsejs)
 }
 
 // 处理登录的响应逻辑
-void doLoginResponse(json &responsejs)
+void doLoginResponse(int clientfd, json &responsejs)
 {
     if (0 != responsejs["errno"].get<int>()) // 登录失败
     {
@@ -304,6 +304,18 @@ void doLoginResponse(json &responsejs)
                     cout << "群消息[" << js["groupid"] << "]:" << js["time"].get<string>() << " [" << js["id"] << "]" << js["name"].get<string>()
                          << " said: " << js["msg"].get<string>() << endl;
                 }
+
+                // 离线消息只有在客户端成功收到并处理后才 ACK，
+                // 服务端据此删除数据库记录。
+                if (js.contains("msg_uuid"))
+                {
+                    json ack;
+                    ack["msgid"] = (js["msgid"].get<int>() == ONE_CHAT_MSG)
+                                       ? ONE_CHAT_MSG_ACK : GROUP_CHAT_MSG_ACK;
+                    ack["id"] = g_currentUser.getId();
+                    ack["msg_uuid"] = js["msg_uuid"].get<string>();
+                    sendWithLength(clientfd, ack.dump());
+                }
             }
         }
 
@@ -367,7 +379,7 @@ void readTaskHandler(int clientfd)
         // 登录响应
         if (LOGIN_MSG_ACK == msgtype)
         {
-            doLoginResponse(js);
+            doLoginResponse(clientfd, js);
             sem_post(&rwsem); // 通知主线程登录结果处理完成
             continue;
         }
@@ -377,6 +389,22 @@ void readTaskHandler(int clientfd)
         {
             doRegResponse(js);
             sem_post(&rwsem); // 通知主线程注册结果处理完成
+            continue;
+        }
+
+        // 创建群组响应。服务端已经完成创建并返回 ACK，客户端需要把结果展示给用户。
+        if (CREATE_GROUP_MSG_ACK == msgtype)
+        {
+            if (js.value("errno", 1) == 0)
+            {
+                cout << "create group success, groupid: "
+                     << js.value("groupid", 0) << endl;
+            }
+            else
+            {
+                cout << "create group failed: "
+                     << js.value("errmsg", "unknown error") << endl;
+            }
             continue;
         }
     }

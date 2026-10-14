@@ -2,12 +2,14 @@
 #include "connectionpool.hpp"
 #include <muduo/base/Logging.h>
 #include <vector>
+#include <cstdlib>
 using namespace std;
 
-static string server = "127.0.0.1";
-string user = "root";
-string password = "123456";
-string dbname = "chat";
+static string envOrDefault(const char *name, const char *fallback)
+{
+    const char *value = getenv(name);
+    return value != nullptr && *value != '\0' ? value : fallback;
+}
 
 MySQL::MySQL()
     : _conn(nullptr), _fromPool(false)
@@ -41,9 +43,16 @@ bool MySQL::connect()
     }
 
     // Fallback: 直接创建新连接
+    LOG_WARN << "MySQL connection pool exhausted; falling back to a temporary connection, available="
+             << ConnectionPool::instance()->available();
     _conn = mysql_init(nullptr);
+    const string server = envOrDefault("CHAT_DB_HOST", "127.0.0.1");
+    const string user = envOrDefault("CHAT_DB_USER", "root");
+    const string password = envOrDefault("CHAT_DB_PASSWORD", "");
+    const string dbname = envOrDefault("CHAT_DB_NAME", "chat");
+    const int port = atoi(envOrDefault("CHAT_DB_PORT", "3306").c_str());
     MYSQL *p = mysql_real_connect(_conn, server.c_str(), user.c_str(),
-                                  password.c_str(), dbname.c_str(), 3306, nullptr, 0);
+                                  password.c_str(), dbname.c_str(), port, nullptr, 0);
     if (p != nullptr)
     {
         mysql_query(_conn, "set names utf8mb4");

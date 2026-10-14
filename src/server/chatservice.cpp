@@ -55,6 +55,9 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
     string pwd = js["password"].get<string>();
 
     dispatch([this, conn, id, pwd]() {
+        // 请求可能已经在业务队列中等待，而客户端先断开；不要为已关闭连接建立在线会话。
+        if (!conn->connected()) return;
+
         // ====== 1. 查用户（缓存旁路） ======
         User user;
         string userKey = "user:" + to_string(id);
@@ -79,6 +82,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
         {
             {
                 lock_guard<mutex> lock(_connMutex);
+                if (!conn->connected()) return;
                 if (_userConnMap.find(id) != _userConnMap.end())
                 {
                     res["errno"] = 2;
@@ -89,6 +93,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
                     return;
                 }
                 _userConnMap[id] = conn;
+                _connUserMap[conn.get()] = id;
             }
 
             _redis.subscribe(id);
@@ -114,7 +119,8 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
             if (!offlineMsgs.empty())
             {
                 res["offlinemsg"] = offlineMsgs;
-                _offlineMsgModel.remove(id);
+                // 不在登录响应发送前删除。客户端逐条 ACK 后才删除，
+                // 这样连接在响应发送失败时仍能在下次登录重试。
             }
             else
             {
@@ -315,25 +321,36 @@ void ChatService::reg(const TcpConnectionPtr &conn, json &js, Timestamp time)
 // ======================== 注销 ========================
 void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
+    if (userid == -1 || (js.contains("id") && js["id"].get<int>() != userid))
+    {
+        LOG_WARN << "loginout rejected: unauthenticated or mismatched connection";
+        return;
+    }
 
     {
         lock_guard<mutex> lock(_connMutex);
         _userConnMap.erase(userid);
+        _connUserMap.erase(conn.get());
     }
-    _redis.unsubscribe(userid);
-    User user(userid, "", "", "offline");
-    _userModel.updateState(user);
+    // 注销请求在 IO 线程到达，状态落库和 Redis 操作放入业务线程池。
+    dispatch([this, userid]() {
+        lock_guard<mutex> lock(_connMutex);
+        if (_userConnMap.find(userid) != _userConnMap.end()) return;
+        _redis.unsubscribe(userid);
+        User user(userid, "", "", "offline");
+        _userModel.updateState(user);
 
-    // 缓存失效：只更新用户状态 → offline（好友/群组不需要删，断线不会改变关系）
-    string userKey = "user:" + to_string(userid);
-    string cached = _redis.cacheGet(userKey);
-    if (!cached.empty())
-    {
-        json uj = json::parse(cached);
-        uj["state"] = "offline";
-        _redis.cacheSet(userKey, uj.dump());
-    }
+        // 缓存失效：只更新用户状态 → offline（好友/群组不需要删，断线不会改变关系）
+        string userKey = "user:" + to_string(userid);
+        string cached = _redis.cacheGet(userKey);
+        if (!cached.empty())
+        {
+            json uj = json::parse(cached);
+            uj["state"] = "offline";
+            _redis.cacheSet(userKey, uj.dump());
+        }
+    });
 }
 
 // ======================== 客户端异常退出 ========================
@@ -348,25 +365,31 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
             {
                 userid = it->first;
                 _userConnMap.erase(it);
+                _connUserMap.erase(conn.get());
                 break;
             }
         }
     }
     if (userid != -1)
     {
-        _redis.unsubscribe(userid);
-        User user(userid, "", "", "offline");
-        _userModel.updateState(user);
+        // 断线回调运行在 IO 线程，状态落库和 Redis 操作放入业务线程池。
+        dispatch([this, userid]() {
+            lock_guard<mutex> lock(_connMutex);
+            if (_userConnMap.find(userid) != _userConnMap.end()) return;
+            _redis.unsubscribe(userid);
+            User user(userid, "", "", "offline");
+            _userModel.updateState(user);
 
-        // 缓存失效：只更新用户状态 → offline
-        string userKey = "user:" + to_string(userid);
-        string cached = _redis.cacheGet(userKey);
-        if (!cached.empty())
-        {
-            json uj = json::parse(cached);
-            uj["state"] = "offline";
-            _redis.cacheSet(userKey, uj.dump());
-        }
+            // 缓存失效：只更新用户状态 → offline
+            string userKey = "user:" + to_string(userid);
+            string cached = _redis.cacheGet(userKey);
+            if (!cached.empty())
+            {
+                json uj = json::parse(cached);
+                uj["state"] = "offline";
+                _redis.cacheSet(userKey, uj.dump());
+            }
+        });
     }
 }
 
@@ -380,7 +403,12 @@ void ChatService::reset()
 void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
     int toid = js["toid"].get<int>();
-    int fromid = js["id"].get<int>();
+    int fromid = authenticatedUserId(conn);
+    if (fromid == -1 || (js.contains("id") && js["id"].get<int>() != fromid))
+    {
+        LOG_WARN << "oneChat rejected: unauthenticated or mismatched connection";
+        return;
+    }
 
     // 生成消息唯一ID并注入到 JSON 中
     string msg_uuid = generateMsgUuid(fromid);
@@ -390,7 +418,12 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     dispatch([this, toid, msg_str]() {
         // ====== Step 1: 先落库 (Store) ======
         // 无论用户在线与否，先持久化。用户登录时批量拉取清理。
-        _offlineMsgModel.insert(toid, msg_str);
+        if (!_offlineMsgModel.insert(toid, msg_str))
+        {
+            LOG_ERROR << "oneChat persistence failed for recipient " << toid
+                      << ", message " << msg_str;
+            return;
+        }
 
         // ====== Step 2: 尝试实时投递 (Deliver) ======
         {
@@ -420,8 +453,9 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
 // ======================== 添加好友 ========================
 void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     int friendid = js["friendid"].get<int>();
+    if (userid == -1) return;
 
     dispatch([this, userid, friendid]() {
         _friendModel.insert(userid, friendid);
@@ -435,9 +469,10 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
 // ======================== 创建群组 ========================
 void ChatService::createGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     string name = js["groupname"].get<string>();
     string desc = js["groupdesc"].get<string>();
+    if (userid == -1) return;
 
     dispatch([this, conn, userid, name, desc]() {
         Group group(-1, name, desc);
@@ -469,8 +504,9 @@ void ChatService::createGroup(const TcpConnectionPtr &conn, json &js, Timestamp 
 // ======================== 加入群组 ========================
 void ChatService::addGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     int groupid = js["groupid"].get<int>();
+    if (userid == -1) return;
 
     dispatch([this, userid, groupid]() {
         _groupModel.addGroup(userid, groupid, "member");
@@ -484,8 +520,13 @@ void ChatService::addGroup(const TcpConnectionPtr &conn, json &js, Timestamp tim
 // 核心: 对每个群成员先落库 → 再尝试实时投递
 void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     int groupid = js["groupid"].get<int>();
+    if (userid == -1 || (js.contains("id") && js["id"].get<int>() != userid))
+    {
+        LOG_WARN << "groupChat rejected: unauthenticated or mismatched connection";
+        return;
+    }
 
     // 生成消息唯一ID并注入到 JSON 中
     string msg_uuid = generateMsgUuid(userid);
@@ -498,7 +539,12 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         // ====== Step 1: 对所有群成员先落库 (Store) ======
         for (int uid : useridVec)
         {
-            _offlineMsgModel.insert(uid, msg_str);
+            if (!_offlineMsgModel.insert(uid, msg_str))
+            {
+                LOG_ERROR << "groupChat persistence failed for recipient " << uid
+                          << ", group " << groupid;
+                return;
+            }
         }
 
         // ====== Step 2: 尝试实时投递 (Deliver) ======
@@ -549,29 +595,45 @@ void ChatService::handleRedisSubscribeMessage(int userid, string msg)
         });
         return;
     }
-    _offlineMsgModel.insert(userid, msg);
+    if (!_offlineMsgModel.insert(userid, msg))
+    {
+        LOG_ERROR << "offline message persistence failed for recipient " << userid;
+    }
 }
 
 // ======================== Store-then-Deliver: 一对一聊天 ACK ========================
 // 客户端收到消息后回执，服务端从离线表删除该消息（避免下次登录重复推送）
 void ChatService::oneChatAck(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     string msg_uuid = js["msg_uuid"].get<string>();
+    if (userid == -1) return;
 
-    _offlineMsgModel.removeByMsgUuid(userid, msg_uuid);
+    dispatch([this, userid, msg_uuid]() {
+        _offlineMsgModel.removeByMsgUuid(userid, msg_uuid);
+    });
 }
 
 // ======================== Store-then-Deliver: 群聊消息 ACK ========================
 void ChatService::groupChatAck(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = authenticatedUserId(conn);
     string msg_uuid = js["msg_uuid"].get<string>();
+    if (userid == -1) return;
 
-    _offlineMsgModel.removeByMsgUuid(userid, msg_uuid);
+    dispatch([this, userid, msg_uuid]() {
+        _offlineMsgModel.removeByMsgUuid(userid, msg_uuid);
+    });
 }
 
-void ChatService::setThreadPool(pool::FixedThreadPool *pool)
+void ChatService::setThreadPool(pool::TaskExecutor *pool)
 {
     m_threadPool = pool;
+}
+
+int ChatService::authenticatedUserId(const TcpConnectionPtr &conn)
+{
+    lock_guard<mutex> lock(_connMutex);
+    auto it = _connUserMap.find(conn.get());
+    return it == _connUserMap.end() ? -1 : it->second;
 }

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="MuduoChatServer login" enabled="true">
+      <stringProp name="TestPlan.comments">Apache JMeter TCP test for 4-byte length-prefixed JSON.</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="server" elementType="Argument"><stringProp name="Argument.name">server</stringProp><stringProp name="Argument.value">${__P(server,127.0.0.1)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+          <elementProp name="port" elementType="Argument"><stringProp name="Argument.name">port</stringProp><stringProp name="Argument.value">${__P(port,6000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+          <elementProp name="base_user_id" elementType="Argument"><stringProp name="Argument.name">base_user_id</stringProp><stringProp name="Argument.value">${__P(base_user_id,1)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+          <elementProp name="password" elementType="Argument"><stringProp name="Argument.name">password</stringProp><stringProp name="Argument.value">${__P(password,change-me)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+        </collectionProp>
+      </elementProp>
+      <stringProp name="TestPlan.user_define_classpath"></stringProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Login users" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController"><boolProp name="LoopController.continue_forever">false</boolProp><stringProp name="LoopController.loops">${__P(loops,1)}</stringProp></elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(threads,50)}</stringProp><stringProp name="ThreadGroup.ramp_time">${__P(ramp_time,10)}</stringProp><boolProp name="ThreadGroup.scheduler">${__P(scheduler,false)}</boolProp><stringProp name="ThreadGroup.duration">${__P(duration,0)}</stringProp><stringProp name="ThreadGroup.delay"></stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Build JSON payload" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp><stringProp name="parameters"></stringProp><stringProp name="filename"></stringProp><stringProp name="cacheKey">muduo_login_payload_v1</stringProp>
+          <stringProp name="script"><![CDATA[
+def id = Integer.parseInt(vars.get('base_user_id')) + ctx.getThreadNum()
+def json = '{"msgid":1,"id":' + id + ',"password":"' + vars.get('password') + '"}'
+def bytes = json.getBytes('UTF-8')
+vars.put('request_hex', bytes.collect { String.format('%02x', (it as int) & 255) }.join())
+          ]]></stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <TCPSampler guiclass="TCPSamplerGui" testclass="TCPSampler" testname="Login request" enabled="true">
+          <stringProp name="TCPSampler.server">${server}</stringProp><stringProp name="TCPSampler.port">${port}</stringProp>
+          <boolProp name="TCPSampler.re_use_connection">true</boolProp><boolProp name="TCPSampler.close_connection">false</boolProp><stringProp name="TCPSampler.timeout">5000</stringProp>
+          <stringProp name="TCPSampler.request">${request_hex}</stringProp><stringProp name="TCPSampler.classname">org.apache.jmeter.protocol.tcp.sampler.LengthPrefixedBinaryTCPClientImpl</stringProp>
+        </TCPSampler>
+        <hashTree>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Login succeeded" enabled="true">
+            <collectionProp name="Asserion.test_strings"><stringProp name="">226572726e6f223a30</stringProp></collectionProp><stringProp name="Assertion.test_field">Assertion.response_data</stringProp><boolProp name="Assertion.assume_success">false</boolProp><intProp name="Assertion.test_type">2</intProp>
+          </ResponseAssertion><hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
+
+

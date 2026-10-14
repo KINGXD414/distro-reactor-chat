@@ -182,6 +182,12 @@ namespace pool
             std::unique_lock<std::mutex> locker(m_mutex); // 加锁要被修改，常方法不能被修改
             return m_queue.size();
         }
+
+        size_t MaxSize() const
+        {
+            std::unique_lock<std::mutex> locker(m_mutex);
+            return m_maxsize;
+        }
     };
 }
 

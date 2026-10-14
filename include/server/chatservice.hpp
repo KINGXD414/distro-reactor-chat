@@ -12,7 +12,8 @@
 #include "friendmodel.hpp"
 #include "groupmodel.hpp"
 #include "redis.hpp"
-#include "FixedThreadPool.hpp"
+#include "TaskExecutor.hpp"
+#include <muduo/base/Logging.h>
 
 using json = nlohmann::json;
 using namespace muduo;
@@ -39,7 +40,7 @@ class ChatService
 {
 public:
     static ChatService *instance();
-    void setThreadPool(pool::FixedThreadPool *pool);
+    void setThreadPool(pool::TaskExecutor *pool);
     void login(const TcpConnectionPtr &conn, json &js, Timestamp time);
     void reg(const TcpConnectionPtr &conn, json &js, Timestamp time);
     void loginout(const TcpConnectionPtr &conn, json &js, Timestamp time);
@@ -56,6 +57,8 @@ public:
     // ====== Store-then-Deliver: 客户端消息确认 ======
     void oneChatAck(const TcpConnectionPtr &conn, json &js, Timestamp time);
     void groupChatAck(const TcpConnectionPtr &conn, json &js, Timestamp time);
+    // 返回连接完成登录后绑定的用户 ID；未认证连接返回 -1。
+    int authenticatedUserId(const TcpConnectionPtr &conn);
 
 private:
     ChatService();
@@ -63,20 +66,29 @@ private:
     template <typename Func>
     void dispatch(Func &&func) {
         if (m_threadPool) {
-            m_threadPool->submit(std::forward<Func>(func));
+            const size_t queued = m_threadPool->queueSize();
+            const size_t capacity = m_threadPool->queueCapacity();
+            if (capacity > 0 && queued * 100 >= capacity * 80) {
+                LOG_WARN << "business thread pool queue is above 80%: "
+                         << queued << "/" << capacity;
+            }
+            if (!m_threadPool->submitTask(std::forward<Func>(func)))
+                LOG_ERROR << "business task rejected because executor is stopping";
         } else {
             func();
         }
     }
     unordered_map<int, MsgHandler> _msgHandlerMap;
     unordered_map<int, TcpConnectionPtr> _userConnMap;
+    // 连接到用户的反向索引，业务消息不得信任客户端提交的 id。
+    unordered_map<const TcpConnection *, int> _connUserMap;
     mutex _connMutex;
     UserModel _userModel;
     OfflineMsgModel _offlineMsgModel;
     FriendModel _friendModel;
     GroupModel _groupModel;
     Redis _redis;
-    pool::FixedThreadPool *m_threadPool;
+    pool::TaskExecutor *m_threadPool;
 };
 
 #endif

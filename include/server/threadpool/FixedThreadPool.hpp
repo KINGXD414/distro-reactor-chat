@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <iostream>
+#include "TaskExecutor.hpp"
 using namespace std;
 
 #ifndef FIXED_THREAD_POOL
@@ -20,7 +21,7 @@ namespace pool
     线程从队列里取出来，直接 task() 执行，不用关心任务原本是什么
     */
     using TaskType = std::function<void(void)>; // 包装器，把要执行的任务，包装成无参无返回值的可调用对象
-    class FixedThreadPool
+    class FixedThreadPool : public TaskExecutor
     {
     private:
         pool::SyncQueue<TaskType> m_queue; // 任务队列
@@ -96,21 +97,30 @@ namespace pool
         }
         void AddTask(const TaskType &task)
         {
-            // 直接把任务对象放进任务队列，如果放不进去（可能是线程池停止了，或者队列满了），就直接执行这个任务
-            if (m_queue.Put(task) != 0)
+            // 队列满时在提交边界做背压，不能静默丢弃业务消息，也不能回退到 IO 线程执行。
+            while (m_running && m_queue.Put(task) != 0)
             {
-                cerr << "AddTask failed!" << endl;
-                task();
+                std::this_thread::yield();
             }
         }
         void AddTask(TaskType &&task)
         {
-            if (m_queue.Put(std::move(task)) != 0)
+            while (m_running && m_queue.Put(task) != 0)
             {
-                cerr << "AddTask failed!" << endl;
-                task();
+                std::this_thread::yield();
             }
         }
+
+        size_t queueSize() const { return m_queue.Size(); }
+        size_t queueCapacity() const { return m_queue.MaxSize(); }
+
+        bool submitTask(TaskType task) override
+        {
+            while (m_running && m_queue.Put(std::move(task)) != 0)
+                std::this_thread::yield();
+            return m_running;
+        }
+
         template <class Func, class... Args>
         auto submit(Func &&func, Args &&...args)
         {
@@ -119,12 +129,9 @@ namespace pool
             auto task = std::make_shared<std::packaged_task<RetType()>>(
                 std::bind(std::forward<Func>(func), std::forward<Args>(args)...));
             std::future<RetType> result = task->get_future(); // 获取这个任务对象的future对象，调用者可以通过这个future对象获取任务的返回值
-            if (m_queue.Put([task]() mutable
-                            { (*task)(); }) != 0) // 把这个任务对象包装成一个无参无返回值的可调用对象，投递到线程池中，线程池中的线程会执行这个可调用对象，也就是执行这个任务对象，输出func0、func1、...、func9999
-            {
-                cerr << "submit failed!" << endl;
-                (*task)();
-            }
+            TaskType queueTask = [task]() mutable
+                            { (*task)(); };
+            submitTask(std::move(queueTask));
             return result;
         }
     };

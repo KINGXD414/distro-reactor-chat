@@ -69,7 +69,7 @@ public:
     }
 
     size_t available() const {
-        // 注意：const方法中需要 mutable mutex
+        lock_guard<mutex> lock(mtx_);
         return pool_.size();
     }
 

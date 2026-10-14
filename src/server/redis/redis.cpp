@@ -1,6 +1,13 @@
 #include "redis.hpp"
 #include <iostream>
+#include <cstdlib>
 using namespace std;
+
+static string envOrDefault(const char *name, const char *fallback)
+{
+    const char *value = getenv(name);
+    return value != nullptr && *value != '\0' ? value : fallback;
+}
 
 Redis::Redis()
     : _publish_context(nullptr), _subcribe_context(nullptr)
@@ -17,17 +24,28 @@ Redis::~Redis()
 
 bool Redis::connect()
 {
-    _publish_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _publish_context)
+    const string host = envOrDefault("CHAT_REDIS_HOST", "127.0.0.1");
+    const int port = atoi(envOrDefault("CHAT_REDIS_PORT", "6379").c_str());
+
+    _publish_context = redisConnect(host.c_str(), port);
+    if (_publish_context == nullptr || _publish_context->err != REDIS_OK)
     {
-        cerr << "connect redis failed!" << endl;
+        cerr << "connect redis publish context failed: "
+             << (_publish_context != nullptr ? _publish_context->errstr : "allocation failed") << endl;
+        if (_publish_context != nullptr) redisFree(_publish_context);
+        _publish_context = nullptr;
         return false;
     }
 
-    _subcribe_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _subcribe_context)
+    _subcribe_context = redisConnect(host.c_str(), port);
+    if (_subcribe_context == nullptr || _subcribe_context->err != REDIS_OK)
     {
-        cerr << "connect redis failed!" << endl;
+        cerr << "connect redis subscribe context failed: "
+             << (_subcribe_context != nullptr ? _subcribe_context->errstr : "allocation failed") << endl;
+        if (_subcribe_context != nullptr) redisFree(_subcribe_context);
+        _subcribe_context = nullptr;
+        redisFree(_publish_context);
+        _publish_context = nullptr;
         return false;
     }
 
@@ -42,7 +60,7 @@ bool Redis::connect()
     });
     t.detach();
 
-    cout << "connect redis-server success!" << endl;
+    cout << "connect redis-server success: " << host << ":" << port << endl;
     return true;
 }
 

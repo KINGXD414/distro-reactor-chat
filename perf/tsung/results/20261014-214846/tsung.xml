@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE tsung SYSTEM "/usr/share/tsung/tsung-1.0.dtd">
+<tsung loglevel="notice" version="1.0">
+  <clients>
+    <client host="localhost" use_controller_vm="true" maxusers="1100" />
+  </clients>
+  <servers>
+    <server host="127.0.0.1" port="6000" type="tcp" />
+  </servers>
+  <load duration="7" unit="minute">
+    <arrivalphase phase="1" duration="55" unit="second">
+      <users maxnumber="1000" arrivalrate="20" unit="second" />
+    </arrivalphase>
+  </load>
+  <sessions>
+    <session probability="100" name="idle_tcp_connection" type="ts_raw">
+      <request><raw datasize="1" ack="no_ack" /></request>
+      <thinktime value="300" random="false" />
+    </session>
+  </sessions>
+</tsung>
+

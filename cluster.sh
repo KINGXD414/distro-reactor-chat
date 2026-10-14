@@ -17,6 +17,9 @@ BIN="$(cd "$(dirname "$0")" && pwd)/bin"
 NGINX_CONF="$(cd "$(dirname "$0")" && pwd)/nginx.conf"
 NGINX_UPSTREAM="/tmp/nginx_chatserver_upstream.conf"
 PID_DIR="/tmp/muduo_chat"
+DB_USER="${CHAT_DB_USER:-root}"
+DB_PASSWORD="${CHAT_DB_PASSWORD:-}"
+DB_NAME="${CHAT_DB_NAME:-chat}"
 mkdir -p "$PID_DIR"
 
 RED='\033[0;31m'
@@ -88,8 +91,13 @@ cmd_start() {
     echo -e "${GREEN}=== Starting $count-node cluster (ports $base_port-$((base_port + count - 1))) ===${NC}"
 
     # 1. 确保 MySQL + Redis 在线状态正确
-    mysql -u root -p123456 chat -e "UPDATE user SET state=0 WHERE state=1;" 2>/dev/null && \
-        echo "  [db] user states reset" || echo -e "  ${YELLOW}[db] MySQL not available — skip${NC}"
+    if [ -z "$DB_PASSWORD" ]; then
+        echo -e "${YELLOW}[db] CHAT_DB_PASSWORD is not set — refusing to run a passwordless reset${NC}"
+    elif MYSQL_PWD="$DB_PASSWORD" mysql -u "$DB_USER" "$DB_NAME" -e "UPDATE user SET state=0 WHERE state=1;" 2>/dev/null; then
+        echo "  [db] user states reset"
+    else
+        echo -e "  ${YELLOW}[db] MySQL not available — skip${NC}"
+    fi
 
     # 2. 收集端口列表
     local ports=()
