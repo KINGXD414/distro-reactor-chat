@@ -19,6 +19,11 @@ lib/
 *.sln
 *.vcxproj
 
+# 压测生成的 HTML 报告（JMeter Dashboard，体积巨大且含第三方前端资源）
+# 保留同目录下的 .jtl 原始数据，报告随时可用命令重新生成：
+#   jmeter -g results/xxx.jtl -e -o results/xxx-report
+results/*-report/
+
 # 面试文档（不提交）
 RESUME.md
 # 临时文件

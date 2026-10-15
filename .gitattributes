@@ -1,0 +1,23 @@
+# ============================================================
+# GitHub Linguist 语言统计规则
+# 目的：让仓库语言占比反映「手写的工程源码」，而不是第三方库和生成产物
+# ============================================================
+
+# 1) 压测生成的 HTML 报告
+#    JMeter Dashboard 模板会把整套前端资源（flot / font-awesome / bootstrap）
+#    复制进每个报告目录，走的是这个路径，属于生成产物，不计入语言统计。
+results/*-report/**                          linguist-generated=true
+results/*-report/**/bower_components/**      linguist-vendored=true
+
+# 2) 第三方库：是别人的代码，不算自己的语言占比
+thirdparty/**                                linguist-vendored=true
+
+# 3) 压测原始数据 / 服务端日志：不是源码，不计入统计
+*.jtl                                        linguist-generated=true
+*.log                                        linguist-generated=true
+perf/tsung/results/**                        linguist-generated=true
+
+# 4) 强制把本仓库识别为 C++ 项目（README 顶部的语言标签）
+*.cpp                                        linguist-language=C++
+*.cc                                         linguist-language=C++
+*.hpp                                        linguist-language=C++
